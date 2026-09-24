@@ -1,0 +1,52 @@
+name: tomography-review
+
+services:
+  api:
+    build: ./api
+    image: tomography-review-api
+    ports:
+      # 宿主机端口可通过 API_PORT 环境变量配置，默认 8000
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    image: tomography-review-web
+    ports:
+      # 宿主机端口可通过 WEB_PORT 环境变量配置，默认 8080
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # 一次性验收服务：等待 API 与 Web 健康后执行端到端核验，
+  # 完成后自行退出，退出码 0 表示通过、非 0 表示失败。
+  verify:
+    build: ./verify
+    image: tomography-review-verify
+    environment:
+      API_URL: http://api:8000
+      WEB_URL: http://web
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    restart: "no"
