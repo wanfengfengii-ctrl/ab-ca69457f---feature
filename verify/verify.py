@@ -71,7 +71,7 @@ def projections_of(grid: list[list[int]]) -> tuple:
     return row_sums, col_sums, diag, anti
 
 
-def brute_force(rows, cols, row_sums, col_sums, diag, anti, known=()):
+def brute_force(rows, cols, row_sums, col_sums, diag, anti, known=(), connected=False):
     """独立暴力枚举全部解（仅供 4×4 使用），按位串升序返回。"""
     known_map = {(r, c): v for r, c, v in known}
     sols = []
@@ -79,8 +79,11 @@ def brute_force(rows, cols, row_sums, col_sums, diag, anti, known=()):
         if any(bits[r * cols + c] != v for (r, c), v in known_map.items()):
             continue
         grid = [list(bits[r * cols : (r + 1) * cols]) for r in range(rows)]
-        if projections_of(grid) == (row_sums, col_sums, diag, anti):
-            sols.append(list(bits))
+        if projections_of(grid) != (row_sums, col_sums, diag, anti):
+            continue
+        if connected and not is_4connected(grid):
+            continue
+        sols.append(list(bits))
     return sols
 
 
@@ -92,6 +95,24 @@ def satisfies(grid, row_sums, col_sums, diag, anti, known) -> bool:
     if projections_of(grid) != (row_sums, col_sums, diag, anti):
         return False
     return all(grid[r][c] == v for r, c, v in known)
+
+
+def is_4connected(grid) -> bool:
+    """全部 1 单元仅经上下左右相邻互达（对角不连接）；无夹杂视为成立。"""
+    rows, cols = len(grid), len(grid[0])
+    ones = {(r, c) for r in range(rows) for c in range(cols) if grid[r][c] == 1}
+    if not ones:
+        return True
+    seen = {next(iter(ones))}
+    stack = list(seen)
+    while stack:
+        r, c = stack.pop()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            q = (r + dr, c + dc)
+            if q in ones and q not in seen:
+                seen.add(q)
+                stack.append(q)
+    return seen == ones
 
 
 MULTI_4x4 = dict(
@@ -362,6 +383,192 @@ def test_larger_instances() -> None:
     check("12×12 结果确定（两次调用一致）", again.get("solutions") == sols)
 
 
+def test_connected_inclusion() -> None:
+    print("[8] 连续夹杂体（四邻连通）约束")
+
+    # ---- 兼容场景：省略字段与显式 false 等价，且响应回显 connected ----
+    base = {k: v for k, v in MULTI_4x4.items()}
+    omitted = reconstruct(base).json()
+    explicit_false = reconstruct({**base, "connected": False}).json()
+    check(
+        "省略 connected 时响应回显 false",
+        omitted.get("connected") is False and explicit_false.get("connected") is False,
+    )
+    check(
+        "省略 connected 与显式 false 裁决完全一致",
+        omitted.get("status") == explicit_false.get("status")
+        and omitted.get("solutions") == explicit_false.get("solutions"),
+    )
+
+    # ---- 连通场景：单夹杂唯一解 ----
+    single = dict(
+        rows=4,
+        cols=4,
+        row_sums=[1, 0, 0, 0],
+        col_sums=[0, 0, 0, 1],
+        diag_sums=[1, 0, 0, 0, 0, 0, 0],
+        antidiag_sums=[0, 0, 0, 1, 0, 0, 0],
+        known_cells=[],
+        connected=True,
+    )
+    body = reconstruct(single).json()
+    check(
+        "单夹杂启用约束 -> unique 且唯一 1 在 (0,3)",
+        body.get("status") == "unique"
+        and bits_of(body["solutions"][0]["grid"]) == "0001000000000000",
+        str(body.get("status")),
+    )
+    check("响应回显 connected=true", body.get("connected") is True)
+    check(
+        "单夹杂见证四邻连通",
+        all(is_4connected(s["grid"]) for s in body.get("solutions", [])),
+    )
+
+    # ---- 连通场景：暴力枚举确认恰有两个连通解，裁决与排序均正确 ----
+    conn_multi = dict(
+        rows=4,
+        cols=4,
+        row_sums=[3, 3, 3, 2],
+        col_sums=[2, 3, 3, 3],
+        diag_sums=[1, 1, 2, 4, 2, 1, 0],
+        antidiag_sums=[1, 1, 2, 3, 2, 1, 1],
+        known_cells=[],
+        connected=True,
+    )
+    body = reconstruct(conn_multi).json()
+    expected = brute_force(
+        4, 4,
+        conn_multi["row_sums"], conn_multi["col_sums"],
+        conn_multi["diag_sums"], conn_multi["antidiag_sums"],
+        connected=True,
+    )
+    check(
+        "连通多解：暴力枚举确认 ≥2 个连通解",
+        len(expected) >= 2 and all(is_4connected([b[r * 4 : (r + 1) * 4] for r in range(4)]) for b in expected),
+        f"实际 {len(expected)}",
+    )
+    check("连通多解状态为 multiple", body.get("status") == "multiple", str(body.get("status")))
+    got = [bits_of(s["grid"]) for s in body.get("solutions", [])]
+    want = ["".join(map(str, b)) for b in expected[:2]]
+    check("连通多解返回最小的两个连通见证", got == want, f"got={got} want={want}")
+    check(
+        "连通多解两见证均仅四邻连通（对角不算）",
+        all(is_4connected(s["grid"]) for s in body.get("solutions", [])),
+    )
+
+    # ---- 断开场景：两个仅对角接触的夹杂，投影把位置钉死 ----
+    diag_only = dict(
+        rows=4,
+        cols=4,
+        row_sums=[1, 1, 0, 0],
+        col_sums=[1, 1, 0, 0],
+        diag_sums=[0, 0, 0, 2, 0, 0, 0],
+        antidiag_sums=[1, 0, 1, 0, 0, 0, 0],
+        known_cells=[],
+    )
+    body_off = reconstruct({**diag_only, "connected": False}).json()
+    check(
+        "不启用约束时对角断开网格可成立（unique，2 个团簇）",
+        body_off.get("status") == "unique"
+        and is_4connected(body_off["solutions"][0]["grid"]) is False,
+        str(body_off.get("status")),
+    )
+    body_on = reconstruct({**diag_only, "connected": True}).json()
+    check(
+        "启用约束后对角断开 -> no_solution（非事后筛除）",
+        body_on.get("status") == "no_solution",
+        str(body_on.get("status")),
+    )
+    check("连通性无解时返回空网格列表", body_on.get("solutions") == [])
+
+    # ---- 无夹杂场景：全 0 投影启用约束仍成立 ----
+    empty = dict(
+        rows=4,
+        cols=4,
+        row_sums=[0] * 4,
+        col_sums=[0] * 4,
+        diag_sums=[0] * 7,
+        antidiag_sums=[0] * 7,
+        known_cells=[],
+        connected=True,
+    )
+    body = reconstruct(empty).json()
+    check(
+        "无夹杂网格启用约束仍 -> unique 且全 0",
+        body.get("status") == "unique"
+        and bits_of(body["solutions"][0]["grid"]) == "0" * 16,
+        str(body.get("status")),
+    )
+
+    # ---- 已知单元与连通约束同模型：钉住两个对角点且无桥接 -> 无解 ----
+    corners = dict(
+        rows=4,
+        cols=4,
+        row_sums=[1, 0, 0, 1],
+        col_sums=[1, 0, 0, 1],
+        diag_sums=[0, 0, 0, 2, 0, 0, 0],
+        antidiag_sums=[1, 0, 0, 0, 0, 0, 1],
+        known_cells=[],
+    )
+    body_off = reconstruct({**corners, "connected": False}).json()
+    check(
+        "不启用约束时对角双角点网格可成立（unique）",
+        body_off.get("status") == "unique"
+        and bits_of(body_off["solutions"][0]["grid"]) == "1000000000000001",
+        str(body_off.get("status")),
+    )
+    body_on = reconstruct(
+        {**corners, "connected": True,
+         "known_cells": [{"row": 0, "col": 0, "value": 1},
+                         {"row": 3, "col": 3, "value": 1}]}
+    ).json()
+    check(
+        "已知单元钉住 (0,0)/(3,3) 且启用连通 -> 无解、空网格",
+        body_on.get("status") == "no_solution" and body_on.get("solutions") == [],
+        str(body_on.get("status")),
+    )
+
+    # ---- 12×12 连通形：构造保证四邻连通的网格，见证须连通 ----
+    rng = random.Random(20260924)
+    rows = cols = 12
+    g = [[0] * cols for _ in range(rows)]
+    r, c = rng.randrange(rows), rng.randrange(cols)
+    g[r][c] = 1
+    placed = 1
+    while placed < 46:
+        nbrs = [
+            (r + dr, c + dc)
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            if 0 <= r + dr < rows and 0 <= c + dc < cols
+        ]
+        nr, nc = rng.choice(nbrs)
+        if g[nr][nc] == 0:
+            g[nr][nc] = 1
+            placed += 1
+        r, c = nr, nc
+    rs, cs, dg, an = projections_of(g)
+    payload = dict(
+        rows=rows, cols=cols,
+        row_sums=rs, col_sums=cs, diag_sums=dg, antidiag_sums=an,
+        known_cells=[], connected=True,
+    )
+    resp = reconstruct(payload)
+    body = resp.json()
+    check("12×12 连通实例请求成功", resp.status_code == 200, f"HTTP {resp.status_code}")
+    sols = body.get("solutions", [])
+    check(
+        "12×12 连通实例有解且见证全部四邻连通",
+        body.get("status") in ("unique", "multiple")
+        and len(sols) >= 1
+        and all(is_4connected(s["grid"]) for s in sols),
+        str(body.get("status")),
+    )
+    check(
+        "12×12 连通实例见证满足四向投影",
+        all(satisfies(s["grid"], rs, cs, dg, an, []) for s in sols),
+    )
+
+
 def main() -> int:
     print(f"verify: API_URL={API_URL} WEB_URL={WEB_URL}")
     wait_ready()
@@ -372,6 +579,7 @@ def main() -> int:
     test_no_solution()
     test_validation()
     test_larger_instances()
+    test_connected_inclusion()
     print(f"\n通过 {PASSES} 项，失败 {len(FAILURES)} 项")
     if FAILURES:
         for f in FAILURES:

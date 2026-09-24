@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 const MIN_SIDE = 4;
 const MAX_SIDE = 12;
@@ -74,6 +74,45 @@ function computeLineSums(grid, R, C) {
   return { row, col, diag, anti };
 }
 
+// 四邻连通团簇分析（对角接触不连接）。
+// 返回夹杂数量、团簇数、首个非主团簇的行优先最早坐标
+// （主团簇 = 含行优先最早 1 单元的团簇）。
+function witnessStats(grid, R, C) {
+  const comp = Array.from({ length: R }, () => Array(C).fill(-1));
+  const starts = [];
+  let count = 0;
+  for (let r = 0; r < R; r += 1) {
+    for (let c = 0; c < C; c += 1) {
+      if (grid[r][c] !== 1 || comp[r][c] !== -1) continue;
+      const id = starts.length;
+      starts.push([r, c]);
+      const stack = [[r, c]];
+      comp[r][c] = id;
+      while (stack.length > 0) {
+        const [cr, cc] = stack.pop();
+        count += 1;
+        const nbrs = [
+          cr > 0 ? [cr - 1, cc] : null,
+          cr + 1 < R ? [cr + 1, cc] : null,
+          cc > 0 ? [cr, cc - 1] : null,
+          cc + 1 < C ? [cr, cc + 1] : null,
+        ];
+        nbrs.forEach((p) => {
+          if (p && grid[p[0]][p[1]] === 1 && comp[p[0]][p[1]] === -1) {
+            comp[p[0]][p[1]] = id;
+            stack.push(p);
+          }
+        });
+      }
+    }
+  }
+  return {
+    count,
+    clusters: starts.length,
+    firstNonPrimary: starts.length > 1 ? starts[1] : null,
+  };
+}
+
 function Badge({ actual, targetText, compact = false }) {
   const parsed = parseIntStrict(targetText);
   if (!parsed.ok)
@@ -96,6 +135,7 @@ export default function App() {
   const [diagSums, setDiagSums] = useState(() => toStrings(EXAMPLE_MULTIPLE.diag_sums));
   const [antiSums, setAntiSums] = useState(() => toStrings(EXAMPLE_MULTIPLE.antidiag_sums));
   const [known, setKnown] = useState({}); // {"r,c": 0|1}
+  const [connected, setConnected] = useState(false); // 连续夹杂体约束
   const [view, setView] = useState("edit"); // "edit" | "result"
   const [result, setResult] = useState(null);
   const [witnessIdx, setWitnessIdx] = useState(0);
@@ -103,6 +143,15 @@ export default function App() {
   const [loading, setLoading] = useState(false);
 
   const lineCount = rows + cols - 1;
+
+  // 任一输入（含连续夹杂体开关）变化后，旧见证不再对应当前条件，立即清除，
+  // 不等待下次请求；失败响应与无解同样不会保留旧网格（见 reconstruct）。
+  useEffect(() => {
+    setResult(null);
+    setErrors([]);
+    setWitnessIdx(0);
+    setView("edit");
+  }, [rows, cols, rowSums, colSums, diagSums, antiSums, known, connected]);
 
   const diagLen = (d) => {
     let n = 0;
@@ -251,6 +300,7 @@ export default function App() {
             const [r, c] = key.split(",").map(Number);
             return { row: r, col: c, value: v };
           }),
+          connected,
         }),
       });
       const body = await resp.json();
@@ -298,6 +348,13 @@ export default function App() {
     () => (showWitness ? computeLineSums(witness.grid, rows, cols) : null),
     [showWitness, witness, rows, cols]
   );
+
+  const statsList = useMemo(() => {
+    if (!result) return [];
+    return result.solutions.map((s) => witnessStats(s.grid, rows, cols));
+  }, [result, rows, cols]);
+
+  const stats = witnessIdx < statsList.length ? statsList[witnessIdx] : null;
 
   const totals = useMemo(() => {
     const sum = (arr) =>
@@ -366,22 +423,24 @@ export default function App() {
     if (errors.length > 0)
       return <div className="banner error">输入非法：共 {errors.length} 处问题，见下方列表</div>;
     if (!result) return null;
+    const connNote = result.connected ? "且全部夹杂物四邻连通" : "";
     if (result.status === "no_solution")
       return (
         <div className="banner nosol">
-          无解：当前四向投影与已知单元不存在可行网格（已清除旧网格）
+          无解：当前四向投影、已知单元{result.connected ? "与连续夹杂体连通约束" : ""}
+          不存在可行网格（已清除旧网格）
         </div>
       );
     if (result.status === "unique")
       return (
         <div className="banner unique">
-          唯一解：投影与已知单元唯一确定该网格（{result.elapsed_ms} ms）
+          唯一解：投影与已知单元{connNote}唯一确定该网格（{result.elapsed_ms} ms）
         </div>
       );
     return (
       <div className="banner multiple">
-        多解：存在歧义，以下为行优先位串（0&lt;1）最小的两份见证，差异单元已高亮（
-        {result.elapsed_ms} ms）
+        多解：存在歧义，以下为行优先位串（0&lt;1）最小的两份见证，差异单元已高亮
+        {result.connected ? "，均满足连续夹杂体四邻连通" : ""}（{result.elapsed_ms} ms）
       </div>
     );
   };
@@ -428,6 +487,14 @@ export default function App() {
         <button className="primary" onClick={reconstruct} disabled={loading}>
           {loading ? "重建中…" : "重建"}
         </button>
+        <label className="connToggle" title="要求任一有夹杂的返回网格中全部 1 单元仅经上下左右相邻互达（对角接触不连接）；无夹杂网格仍可成立">
+          <input
+            type="checkbox"
+            checked={connected}
+            onChange={(e) => setConnected(e.target.checked)}
+          />
+          连续夹杂体约束（四邻连通，对角不算）
+        </label>
         <button onClick={() => loadExample(EXAMPLE_MULTIPLE)}>载入多解示例</button>
         <button onClick={() => loadExample(EXAMPLE_UNIQUE)}>载入唯一解示例</button>
         <button onClick={randomInstance}>随机实例</button>
@@ -480,6 +547,12 @@ export default function App() {
             {totalsConsistent && (
               <li>四组投影总和一致（均为 {totals.row}），矛盾来自投影结构或已知单元约束</li>
             )}
+            {result.connected && (
+              <li>
+                已启用连续夹杂体约束：全部 1 单元必须仅经上下左右相邻互达，对角接触不算连接
+                ——可能存在满足四向投影但夹杂物被基材分隔成多个团簇的伪见证，可关闭该约束对照
+              </li>
+            )}
             <li>已知单元共 {Object.keys(known).length} 个，可尝试逐个清除定位冲突来源</li>
           </ul>
         </div>
@@ -515,6 +588,33 @@ export default function App() {
               </span>
             )}
           </div>
+
+          {showWitness && stats && (
+            <div className="witnessStats">
+              {result.solutions.map((_, i) => {
+                const s = statsList[i];
+                const nonPrimary = s.firstNonPrimary
+                  ? `(${s.firstNonPrimary[0]}, ${s.firstNonPrimary[1]})`
+                  : "—";
+                return (
+                  <span
+                    key={i}
+                    className={`wstat ${i === witnessIdx ? "active" : ""}`}
+                    title="主团簇 = 含行优先最早夹杂物的团簇"
+                  >
+                    见证 {i + 1}：夹杂数量 <b>{s.count}</b> ｜ 连通团簇数{" "}
+                    <b className={s.clusters > 1 ? "bad" : "ok"}>{s.clusters}</b> ｜
+                    首个非主团簇坐标 <b>{nonPrimary}</b>
+                  </span>
+                );
+              })}
+              {result.connected && stats.clusters > 1 && (
+                <span className="wstat warn">
+                  异常：已启用连续夹杂体约束，返回网格却存在 {stats.clusters} 个团簇
+                </span>
+              )}
+            </div>
+          )}
 
           <div
             className="grid"

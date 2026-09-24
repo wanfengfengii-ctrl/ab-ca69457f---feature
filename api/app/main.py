@@ -70,6 +70,7 @@ def reconstruct(req: ReconstructRequest) -> ReconstructResponse:
             req.diag_sums,
             req.antidiag_sums,
             known,
+            require_connected=req.connected,
         )
     except RuntimeError as exc:  # 求解器超时等未决情形
         return JSONResponse(
@@ -87,6 +88,7 @@ def reconstruct(req: ReconstructRequest) -> ReconstructResponse:
         status=status,
         rows=req.rows,
         cols=req.cols,
+        connected=req.connected,
         solutions=out,
         elapsed_ms=elapsed_ms,
     )

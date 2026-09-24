@@ -40,6 +40,10 @@ class ReconstructRequest(BaseModel):
         description="副对角投影，按(行+列)和递增，长度=rows+cols-1"
     )
     known_cells: list[KnownCell] = Field(default_factory=list)
+    connected: bool = Field(
+        default=False,
+        description="是否要求全部夹杂物（值为 1 的单元）四邻连通构成同一连续夹杂体；省略视为 false",
+    )
 
 
 class SolutionOut(BaseModel):
@@ -51,6 +55,7 @@ class ReconstructResponse(BaseModel):
     status: Literal["no_solution", "unique", "multiple"]
     rows: int
     cols: int
+    connected: bool = Field(description="本次求解是否启用了连续夹杂体约束")
     solutions: list[SolutionOut]
     elapsed_ms: int
 

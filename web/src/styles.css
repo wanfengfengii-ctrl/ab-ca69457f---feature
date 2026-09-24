@@ -75,6 +75,40 @@ input:focus { outline: 2px solid #93c5fd; border-color: var(--accent); }
 .totals.ok { color: var(--ok); }
 .totals.bad { color: var(--bad); font-weight: 600; }
 
+.connToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #f8fafc;
+  color: var(--ink) !important;
+  cursor: pointer;
+}
+.connToggle input { margin: 0; }
+
+.witnessStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.wstat {
+  font-size: 12px;
+  color: var(--muted);
+  background: #f1f5fb;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+.wstat.active { border-color: var(--accent); background: #eef4ff; color: var(--ink); }
+.wstat b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.wstat b.ok { color: var(--ok); }
+.wstat b.bad { color: var(--bad); }
+.wstat.warn { color: var(--bad); border-color: #fca5a5; background: #fff7f7; font-weight: 600; }
+
 .banner {
   margin-top: 12px;
   padding: 10px 14px;

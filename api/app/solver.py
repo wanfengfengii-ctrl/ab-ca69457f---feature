@@ -10,6 +10,12 @@
 
 不使用贪心、随机搜索，也不会"找到首解后推测唯一性"：
 唯一性由 CP-SAT 对排除首解后的模型给出不可行证明来判定。
+
+启用"连续夹杂体"约束（require_connected=True）时，连通性与四向投影、
+已知单元、字典序排序在**同一个模型**中一起求解，不会先取旧见证再事后筛除：
+以行优先最早的 1 单元为唯一根，根层数为 0；其余每个 1 单元必须有一个
+上下左右相邻（对角不算）的 1 单元，其层数恰小 1，由此所有 1 单元互达。
+全 0 网格（无夹杂）天然成立。
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ class ReconstructionSolver:
         diag_sums: list[int],
         antidiag_sums: list[int],
         known_cells: list[tuple[int, int, int]],
+        require_connected: bool = False,
     ) -> None:
         self.rows = rows
         self.cols = cols
@@ -43,10 +50,83 @@ class ReconstructionSolver:
         self.diag_sums = diag_sums
         self.antidiag_sums = antidiag_sums
         self.known_cells = known_cells
+        self.require_connected = require_connected
 
     # ------------------------------------------------------------------
     # 模型构建
     # ------------------------------------------------------------------
+    def _add_connectedness(
+        self,
+        model: cp_model.CpModel,
+        x: list[cp_model.IntVar],
+    ) -> None:
+        """加入"全部 1 单元四邻连通（对角不连接）"约束；全 0 网格仍可行。
+
+        取行优先最早的 1 单元为唯一根：
+          * 根 root[i] 恰好为"该单元为 1 且此前没有 1"；
+          * 根层数 lvl=0，非根 1 单元层数 1..n-1；
+          * 每个非根 1 单元至少有一个四邻 1 前驱，层数恰小 1
+            （沿层数严格递减必能到达唯一的根，故所有 1 互达）。
+        """
+        rows, cols, n = self.rows, self.cols, self.n
+
+        # 前缀或 pref[i] = 1 表示位置 i 之前（不含）已出现过 1。
+        pref = [model.NewConstant(0)]
+        for i in range(n - 1):
+            p = model.NewBoolVar(f"pref{i}")
+            model.AddMaxEquality(p, [pref[-1], x[i]])
+            pref.append(p)
+
+        root = [model.NewBoolVar(f"root{i}") for i in range(n)]
+        for i in range(n):
+            # root[i] = x[i] 且 pref[i]=0
+            model.Add(root[i] == 1).only_enforce_if(x[i], pref[i].Not())
+            model.Add(root[i] == 0).only_enforce_if(x[i].Not())
+            model.Add(root[i] == 0).only_enforce_if(pref[i])
+        # 有夹杂时恰好一个根；无夹杂时没有根（全 0 网格仍成立）。
+        total = sum(x)
+        has_ones = model.NewBoolVar("has_ones")
+        model.Add(total >= 1).OnlyEnforceIf(has_ones)
+        model.Add(total == 0).OnlyEnforceIf(has_ones.Not())
+        model.Add(sum(root) == 1).OnlyEnforceIf(has_ones)
+        model.Add(sum(root) == 0).OnlyEnforceIf(has_ones.Not())
+
+        lvl = [model.NewIntVar(0, n - 1, f"lvl{i}") for i in range(n)]
+        neighbors: list[list[int]] = [[] for _ in range(n)]
+        for r in range(rows):
+            for c in range(cols):
+                i = r * cols + c
+                if r > 0:
+                    neighbors[i].append(i - cols)
+                if r + 1 < rows:
+                    neighbors[i].append(i + cols)
+                if c > 0:
+                    neighbors[i].append(i - 1)
+                if c + 1 < cols:
+                    neighbors[i].append(i + 1)
+
+        for i in range(n):
+            # 0 单元不参与层结构。
+            model.Add(lvl[i] == 0).only_enforce_if(x[i].Not())
+            # 根层数为 0。
+            model.Add(lvl[i] == 0).only_enforce_if(root[i])
+            # 非根的 1 单元层数 >=1，且必须存在一个层数恰小 1 的四邻 1 前驱。
+            nonroot_one = model.NewBoolVar(f"nonroot_one{i}")
+            model.Add(nonroot_one == 1).only_enforce_if(x[i], root[i].Not())
+            model.Add(nonroot_one == 0).only_enforce_if(x[i].Not())
+            model.Add(nonroot_one == 0).only_enforce_if(root[i])
+            model.Add(lvl[i] >= 1).only_enforce_if(nonroot_one)
+            preds = []
+            for j in neighbors[i]:
+                p = model.NewBoolVar(f"pred{j}_of{i}")
+                # 前驱边：两端均为 1，且层数严格相差 1（从 j 指向 i）。
+                # 蕴含式保证 0 单元上不可能存在前驱边，无需反向约束。
+                model.Add(x[i] == 1).only_enforce_if(p)
+                model.Add(x[j] == 1).only_enforce_if(p)
+                model.Add(lvl[i] == lvl[j] + 1).only_enforce_if(p)
+                preds.append(p)
+            model.Add(sum(preds) >= 1).only_enforce_if(nonroot_one)
+
     def _build_model(
         self, exclude_bits: list[int] | None = None
     ) -> tuple[cp_model.CpModel, list[cp_model.IntVar]]:
@@ -89,6 +169,9 @@ class ReconstructionSolver:
         # 已知单元
         for r, c, v in self.known_cells:
             model.Add(at(r, c) == v)
+        # 连续夹杂体约束：与投影、已知单元同模型一起求解。
+        if self.require_connected:
+            self._add_connectedness(model, x)
         # 排除位串：至少一个单元取值不同
         if exclude_bits is not None:
             model.Add(
@@ -183,9 +266,17 @@ def solve_reconstruction(
     diag_sums: list[int],
     antidiag_sums: list[int],
     known_cells: list[tuple[int, int, int]],
+    require_connected: bool = False,
 ) -> tuple[str, list[list[int]]]:
     """便捷入口：构建求解器并执行完备求解。"""
     solver = ReconstructionSolver(
-        rows, cols, row_sums, col_sums, diag_sums, antidiag_sums, known_cells
+        rows,
+        cols,
+        row_sums,
+        col_sums,
+        diag_sums,
+        antidiag_sums,
+        known_cells,
+        require_connected=require_connected,
     )
     return solver.solve()
