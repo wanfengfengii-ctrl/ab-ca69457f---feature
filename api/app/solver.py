@@ -10,6 +10,12 @@
 
 不使用贪心、随机搜索，也不会"找到首解后推测唯一性"：
 唯一性由 CP-SAT 对排除首解后的模型给出不可行证明来判定。
+
+可选的"连续夹杂体"约束（require_connected=True）：任一可行网格中
+所有值为 1 的单元必须仅经上下左右相邻的 1 单元互达（对角接触不算
+连通；全 0 的无夹杂网格仍然合法）。该约束与四向投影、已知单元在
+同一模型内建模——可行性判定、字典序分块最小化、唯一性证明都在
+同一次完备求解中完成，不是先求出旧见证再筛除。
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ class ReconstructionSolver:
         diag_sums: list[int],
         antidiag_sums: list[int],
         known_cells: list[tuple[int, int, int]],
+        require_connected: bool = False,
     ) -> None:
         self.rows = rows
         self.cols = cols
@@ -43,6 +50,7 @@ class ReconstructionSolver:
         self.diag_sums = diag_sums
         self.antidiag_sums = antidiag_sums
         self.known_cells = known_cells
+        self.require_connected = require_connected
 
     # ------------------------------------------------------------------
     # 模型构建
@@ -89,6 +97,9 @@ class ReconstructionSolver:
         # 已知单元
         for r, c, v in self.known_cells:
             model.Add(at(r, c) == v)
+        # 连续夹杂体约束：所有 1 单元四向连通（与投影同模型求解）
+        if self.require_connected:
+            self._add_connectivity(model, x)
         # 排除位串：至少一个单元取值不同
         if exclude_bits is not None:
             model.Add(
@@ -99,6 +110,57 @@ class ReconstructionSolver:
                 >= 1
             )
         return model, x
+
+    def _add_connectivity(
+        self, model: cp_model.CpModel, x: list[cp_model.IntVar]
+    ) -> None:
+        """所有值为 1 的单元必须仅经上下左右相邻的 1 单元互达。
+
+        用单源网络流编码：在 1 单元中恰选一个根，根注入 T 单位流
+        （T = 1 单元总数，由投影等式固定），其余每个 1 单元净消耗
+        1 单位，流只能经过 1 单元之间的四向边。
+          * 若 1 单元四向连通：取任一生成树沿树边送流即可满足；
+          * 若流可行：每个非根 1 单元都有来自根的流路径，路径上
+            全为 1 单元，故全部 1 单元同属一个四向连通分量。
+        两个方向都成立，因此该编码与"单团簇"完全等价。
+        T <= 1（无夹杂或单个夹杂）时自然满足，无需建模。
+        """
+        rows, cols = self.rows, self.cols
+        total = sum(self.row_sums)  # 1 单元总数（投影等式已固定）
+        if total <= 1:
+            return
+        n = self.n
+
+        def neighbors(idx: int):
+            r, c = divmod(idx, cols)
+            if r > 0:
+                yield idx - cols
+            if r + 1 < rows:
+                yield idx + cols
+            if c > 0:
+                yield idx - 1
+            if c + 1 < cols:
+                yield idx + 1
+
+        # 1 单元中恰选一个根
+        root = [model.NewBoolVar(f"root{i}") for i in range(n)]
+        for i in range(n):
+            model.Add(root[i] <= x[i])
+        model.AddExactlyOne(root)
+
+        # 四向相邻对之间的有向流；流只能经过 1 单元
+        flow: dict[tuple[int, int], cp_model.IntVar] = {}
+        for i in range(n):
+            for j in neighbors(i):
+                f = model.NewIntVar(0, total, f"f{i}_{j}")
+                flow[(i, j)] = f
+                model.Add(f <= total * x[i])
+                model.Add(f <= total * x[j])
+        # 流守恒：非根 1 单元净消耗 1；根净注入 total-1（自身也消耗 1）
+        for i in range(n):
+            inflow = sum(flow[(j, i)] for j in neighbors(i))
+            outflow = sum(flow[(i, j)] for j in neighbors(i))
+            model.Add(inflow - outflow == x[i] - total * root[i])
 
     @staticmethod
     def _new_solver() -> cp_model.CpSolver:
@@ -183,9 +245,17 @@ def solve_reconstruction(
     diag_sums: list[int],
     antidiag_sums: list[int],
     known_cells: list[tuple[int, int, int]],
+    require_connected: bool = False,
 ) -> tuple[str, list[list[int]]]:
     """便捷入口：构建求解器并执行完备求解。"""
     solver = ReconstructionSolver(
-        rows, cols, row_sums, col_sums, diag_sums, antidiag_sums, known_cells
+        rows,
+        cols,
+        row_sums,
+        col_sums,
+        diag_sums,
+        antidiag_sums,
+        known_cells,
+        require_connected,
     )
     return solver.solve()

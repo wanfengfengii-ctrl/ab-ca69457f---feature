@@ -40,6 +40,13 @@ class ReconstructRequest(BaseModel):
         description="副对角投影，按(行+列)和递增，长度=rows+cols-1"
     )
     known_cells: list[KnownCell] = Field(default_factory=list)
+    require_connected: bool = Field(
+        default=False,
+        description=(
+            "连续夹杂体约束：为 1 的单元必须仅经上下左右相邻的 1 单元互达"
+            "（对角接触不算连通，全 0 网格仍合法）。可省略，默认不启用。"
+        ),
+    )
 
 
 class SolutionOut(BaseModel):

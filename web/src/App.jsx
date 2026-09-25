@@ -29,6 +29,7 @@ const LOC_NAMES = {
   diag_sums: "对角投影(r−c)",
   antidiag_sums: "副对角投影(r+c)",
   known_cells: "已知单元",
+  require_connected: "连续夹杂体",
   rows: "行数",
   cols: "列数",
   solver: "求解器",
@@ -74,6 +75,55 @@ function computeLineSums(grid, R, C) {
   return { row, col, diag, anti };
 }
 
+// 统计见证网格中的夹杂物：总数、四向连通团簇数、首个非主团簇。
+// 团簇只经上下左右相邻的 1 单元互达，对角接触不算连通。
+function analyzeInclusions(grid, R, C) {
+  const visited = Array.from({ length: R }, () => Array(C).fill(false));
+  const clusters = []; // 按行优先扫描依次发现；cells[0] 为该团簇行优先最小单元
+  let count = 0;
+  for (let r = 0; r < R; r += 1) {
+    for (let c = 0; c < C; c += 1) {
+      if (grid[r][c] !== 1) continue;
+      count += 1;
+      if (visited[r][c]) continue;
+      const cells = [];
+      const queue = [[r, c]];
+      visited[r][c] = true;
+      while (queue.length > 0) {
+        const [cr, cc] = queue.shift();
+        cells.push([cr, cc]);
+        [
+          [cr - 1, cc],
+          [cr + 1, cc],
+          [cr, cc - 1],
+          [cr, cc + 1],
+        ].forEach(([nr, nc]) => {
+          if (
+            nr >= 0 && nr < R && nc >= 0 && nc < C &&
+            !visited[nr][nc] && grid[nr][nc] === 1
+          ) {
+            visited[nr][nc] = true;
+            queue.push([nr, nc]);
+          }
+        });
+      }
+      clusters.push(cells);
+    }
+  }
+  // 主团簇：单元数最多；并列时取行优先最小单元靠前者（即先被发现者）。
+  let mainIdx = -1;
+  clusters.forEach((cells, i) => {
+    if (mainIdx === -1 || cells.length > clusters[mainIdx].length) mainIdx = i;
+  });
+  const firstNonMain = clusters.find((_, i) => i !== mainIdx) || null;
+  return {
+    count,
+    clusterCount: clusters.length,
+    mainSize: mainIdx === -1 ? 0 : clusters[mainIdx].length,
+    firstNonMain, // null 表示无夹杂或全部互达
+  };
+}
+
 function Badge({ actual, targetText, compact = false }) {
   const parsed = parseIntStrict(targetText);
   if (!parsed.ok)
@@ -96,6 +146,7 @@ export default function App() {
   const [diagSums, setDiagSums] = useState(() => toStrings(EXAMPLE_MULTIPLE.diag_sums));
   const [antiSums, setAntiSums] = useState(() => toStrings(EXAMPLE_MULTIPLE.antidiag_sums));
   const [known, setKnown] = useState({}); // {"r,c": 0|1}
+  const [requireConnected, setRequireConnected] = useState(false); // 连续夹杂体约束
   const [view, setView] = useState("edit"); // "edit" | "result"
   const [result, setResult] = useState(null);
   const [witnessIdx, setWitnessIdx] = useState(0);
@@ -128,6 +179,13 @@ export default function App() {
     setWitnessIdx(0);
   }
 
+  // 启用/关闭约束、编辑任一输入后，旧重建结果不再对应当前条件：
+  // 立即清除旧网格并回到编辑视图，避免误核对过时见证。
+  function invalidateResult() {
+    clearOutcome();
+    setView("edit");
+  }
+
   function applySize(nextRows, nextCols) {
     const R = clampSide(nextRows);
     const C = clampSide(nextCols);
@@ -145,8 +203,7 @@ export default function App() {
         })
       )
     );
-    clearOutcome();
-    setView("edit");
+    invalidateResult();
   }
 
   function loadExample(ex) {
@@ -157,8 +214,7 @@ export default function App() {
     setDiagSums(toStrings(ex.diag_sums));
     setAntiSums(toStrings(ex.antidiag_sums));
     setKnown({});
-    clearOutcome();
-    setView("edit");
+    invalidateResult();
   }
 
   function randomInstance() {
@@ -171,8 +227,7 @@ export default function App() {
     setDiagSums(toStrings(sums.diag));
     setAntiSums(toStrings(sums.anti));
     setKnown({});
-    clearOutcome();
-    setView("edit");
+    invalidateResult();
   }
 
   function cycleKnown(r, c) {
@@ -184,6 +239,7 @@ export default function App() {
       else delete next[key];
       return next;
     });
+    invalidateResult();
   }
 
   // ---------- 客户端校验（与后端规则一致，逐线可定位） ----------
@@ -251,6 +307,8 @@ export default function App() {
             const [r, c] = key.split(",").map(Number);
             return { row: r, col: c, value: v };
           }),
+          // 连续夹杂体约束；未启用时省略该字段，保持与既有接口兼容
+          ...(requireConnected ? { require_connected: true } : {}),
         }),
       });
       const body = await resp.json();
@@ -296,6 +354,12 @@ export default function App() {
 
   const actual = useMemo(
     () => (showWitness ? computeLineSums(witness.grid, rows, cols) : null),
+    [showWitness, witness, rows, cols]
+  );
+
+  // 当前见证的夹杂物统计（夹杂数量 / 连通团簇数 / 首个非主团簇）
+  const inclusionStats = useMemo(
+    () => (showWitness ? analyzeInclusions(witness.grid, rows, cols) : null),
     [showWitness, witness, rows, cols]
   );
 
@@ -357,7 +421,10 @@ export default function App() {
         inputMode="numeric"
         value={value}
         placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          invalidateResult();
+        }}
       />
     );
   }
@@ -375,12 +442,14 @@ export default function App() {
     if (result.status === "unique")
       return (
         <div className="banner unique">
-          唯一解：投影与已知单元唯一确定该网格（{result.elapsed_ms} ms）
+          唯一解：投影与已知单元唯一确定该网格
+          {requireConnected && "（已启用连续夹杂体约束）"}（{result.elapsed_ms} ms）
         </div>
       );
     return (
       <div className="banner multiple">
-        多解：存在歧义，以下为行优先位串（0&lt;1）最小的两份见证，差异单元已高亮（
+        多解：存在歧义，以下为行优先位串（0&lt;1）最小的两份见证
+        {requireConnected && "（已启用连续夹杂体约束）"}，差异单元已高亮（
         {result.elapsed_ms} ms）
       </div>
     );
@@ -393,6 +462,7 @@ export default function App() {
         <p className="subtitle">
           编辑四向投影与已知单元 → 调用真实 API 完备重建 → 切换核对歧义见证。
           行列从 0 编号；对角投影按（行−列）递增，副对角投影按（行+列）递增。
+          勾选"连续夹杂体"后，所有夹杂物单元必须四向连通；编辑任一输入即作废旧结果。
         </p>
       </header>
 
@@ -428,10 +498,29 @@ export default function App() {
         <button className="primary" onClick={reconstruct} disabled={loading}>
           {loading ? "重建中…" : "重建"}
         </button>
+        <label
+          className="connToggle"
+          title="金相确认为同一连续夹杂体时启用：任一见证中所有夹杂物单元必须仅经上下左右相邻互达（对角接触不算连通）；无夹杂的网格仍可成立"
+        >
+          <input
+            type="checkbox"
+            checked={requireConnected}
+            onChange={(e) => {
+              setRequireConnected(e.target.checked);
+              invalidateResult();
+            }}
+          />
+          连续夹杂体（四向连通）
+        </label>
         <button onClick={() => loadExample(EXAMPLE_MULTIPLE)}>载入多解示例</button>
         <button onClick={() => loadExample(EXAMPLE_UNIQUE)}>载入唯一解示例</button>
         <button onClick={randomInstance}>随机实例</button>
-        <button onClick={() => setKnown({})}>
+        <button
+          onClick={() => {
+            setKnown({});
+            invalidateResult();
+          }}
+        >
           清空已知单元
         </button>
         <button
@@ -440,8 +529,7 @@ export default function App() {
             setColSums(Array(cols).fill(""));
             setDiagSums(Array(lineCount).fill(""));
             setAntiSums(Array(lineCount).fill(""));
-            clearOutcome();
-            setView("edit");
+            invalidateResult();
           }}
         >
           清空投影
@@ -564,6 +652,27 @@ export default function App() {
             <span><i className="sw knownsw" /> 已知单元（角标）</span>
             {!showWitness && <span>当前为编辑模式：点击网格循环设置已知单元</span>}
           </div>
+
+          {showWitness && inclusionStats && (
+            <div className="witnessStats">
+              <span className="wsTitle">
+                {result.solutions.length === 2 ? `见证 ${witnessIdx + 1}` : "见证"}夹杂物统计：
+              </span>
+              <span>夹杂 {inclusionStats.count} 个</span>
+              <span>
+                连通团簇 {inclusionStats.clusterCount} 个
+                {inclusionStats.clusterCount > 0 && `（主团簇 ${inclusionStats.mainSize} 格）`}
+              </span>
+              <span>
+                首个非主团簇：
+                {inclusionStats.firstNonMain
+                  ? `(${inclusionStats.firstNonMain[0][0]}, ${inclusionStats.firstNonMain[0][1]}) 起，共 ${inclusionStats.firstNonMain.length} 格`
+                  : inclusionStats.clusterCount === 0
+                    ? "无（无夹杂）"
+                    : "无（全部互达）"}
+              </span>
+            </div>
+          )}
 
           {showWitness && (
             <div className="bits">
